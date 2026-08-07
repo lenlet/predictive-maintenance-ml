@@ -1,20 +1,22 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
-from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.svm import SVC
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import (classification_report, confusion_matrix,
-                             roc_auc_score, roc_curve, precision_recall_curve,
-                             average_precision_score, brier_score_loss)
-from sklearn.calibration import calibration_curve
+import warnings
+
+import joblib
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
+import numpy as np
+import pandas as pd
 import seaborn as sns
 import shap
-import warnings
+import streamlit as st
+from sklearn.calibration import calibration_curve
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (average_precision_score, brier_score_loss,
+                             precision_recall_curve, roc_auc_score, roc_curve)
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.svm import SVC
+
+from app_core import ARTIFACT_PATH, FEATURES, build_input_row, prepare_data
+
 warnings.filterwarnings('ignore')
 
 # ─────────────────────────────────────────────
@@ -34,80 +36,30 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
 # ─────────────────────────────────────────────
-# 1. DATA LOADING
+# DATA — loading, features, and the split all live in app_core, shared with
+# train.py so the two cannot drift apart.
 # ─────────────────────────────────────────────
 @st.cache_data
-def load_data():
-    url = "https://archive.ics.uci.edu/ml/machine-learning-databases/00601/ai4i2020.csv"
-    df = pd.read_csv(url)
-    df.columns = ['ID', 'Product_ID', 'Type', 'Air_Temp', 'Process_Temp',
-                  'Rot_Speed', 'Torque', 'Tool_Wear', 'Machine_Failure',
-                  'TWF', 'HDF', 'PWF', 'OSF', 'RNF']
-    return df
+def get_data():
+    return prepare_data()
+
 
 # ─────────────────────────────────────────────
-# 2. FEATURE ENGINEERING — with physical justification
-# ─────────────────────────────────────────────
-def engineer_features(data: pd.DataFrame) -> pd.DataFrame:
-    df = data.copy()
-
-    # Thermal gradient — drives HDF (Heat Dissipation Failure)
-    # If process temp rises relative to air temp, cooling is inadequate
-    df['Temp_Diff'] = df['Process_Temp'] - df['Air_Temp']
-
-    # Mechanical power (W) — proxy for electrical load on motor
-    # P = τ × ω; high power + high wear = PWF territory
-    df['Power'] = df['Torque'] * (df['Rot_Speed'] * 2 * np.pi / 60)  # SI units
-
-    # Wear-normalized torque — how hard is the tool working per wear-minute?
-    # Sudden torque spikes on a worn tool signal imminent TWF
-    df['Wear_Strain'] = df['Tool_Wear'] * df['Torque']
-
-    # Speed-torque ratio — machines operating outside the stable envelope
-    # (low speed, high torque) are prone to OSF
-    df['Speed_Torque_Ratio'] = df['Rot_Speed'] / (df['Torque'] + 1e-9)
-
-    # Thermal stress index — compound indicator combining temp diff and power
-    df['Thermal_Stress'] = df['Temp_Diff'] * df['Power'] / 1e6  # scaled
-
-    # Product type encoding (L < M < H quality tiers have different tolerances)
-    type_map = {'L': 0, 'M': 1, 'H': 2}
-    df['Type_Encoded'] = df['Type'].map(type_map)
-
-    return df
-
-@st.cache_data
-def prepare_data():
-    df = load_data()
-    df = engineer_features(df)
-
-    features = [
-        'Air_Temp', 'Process_Temp', 'Rot_Speed', 'Torque', 'Tool_Wear',
-        'Temp_Diff', 'Power', 'Wear_Strain', 'Speed_Torque_Ratio',
-        'Thermal_Stress', 'Type_Encoded'
-    ]
-    X = df[features]
-    y = df['Machine_Failure']
-
-    # Failure mode targets (multi-label)
-    failure_modes = df[['TWF', 'HDF', 'PWF', 'OSF', 'RNF']]
-
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
-    )
-
-    scaler = StandardScaler()
-    X_train_s = scaler.fit_transform(X_train)
-    X_test_s  = scaler.transform(X_test)
-
-    return df, X, y, X_train, X_test, y_train, y_test, X_train_s, X_test_s, scaler, features, failure_modes
-
-# ─────────────────────────────────────────────
-# 3. MODEL COMPARISON — justify your final choice
+# MODELS — load the precomputed artifact when it exists, otherwise train.
+#
+# `python train.py` writes artifacts.joblib (~0.1 MB). Loading it takes ~0.04s
+# against ~43s to retrain, which matters because a free-tier Streamlit app sleeps
+# after inactivity and cold-starts on the next visitor. The fallback keeps the
+# repo working for anyone who clones it and wants to train from scratch.
 # ─────────────────────────────────────────────
 @st.cache_resource
-def train_all_models(_X_train_s, _y_train, _X_test_s, _y_test):
+def load_or_train(_X_train_s, _y_train, _X_test_s, _y_test):
+    if ARTIFACT_PATH.exists():
+        art = joblib.load(ARTIFACT_PATH)
+        return art["results"], art["final_model"], art["shap_vals"], art["best_name"]
+
     candidates = {
         "Logistic Regression": LogisticRegression(class_weight='balanced', max_iter=1000, random_state=42),
         "Random Forest":       RandomForestClassifier(n_estimators=200, class_weight='balanced', random_state=42),
@@ -115,77 +67,70 @@ def train_all_models(_X_train_s, _y_train, _X_test_s, _y_test):
         "SVM (RBF)":           SVC(kernel='rbf', probability=True, class_weight='balanced', C=10, gamma='scale', random_state=42),
     }
 
-    results = {}
+    results, models = {}, {}
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
     for name, clf in candidates.items():
         clf.fit(_X_train_s, _y_train)
-        y_pred  = clf.predict(_X_test_s)
         y_proba = clf.predict_proba(_X_test_s)[:, 1]
-
         cv_roc = cross_val_score(clf, _X_train_s, _y_train, cv=cv, scoring='roc_auc', n_jobs=-1)
 
+        models[name] = clf
         results[name] = {
-            "model":    clf,
-            "roc_auc":  roc_auc_score(_y_test, y_proba),
-            "avg_prec": average_precision_score(_y_test, y_proba),
-            "brier":    brier_score_loss(_y_test, y_proba),
+            "roc_auc":     roc_auc_score(_y_test, y_proba),
+            "avg_prec":    average_precision_score(_y_test, y_proba),
+            "brier":       brier_score_loss(_y_test, y_proba),
             "cv_roc_mean": cv_roc.mean(),
             "cv_roc_std":  cv_roc.std(),
-            "y_pred":   y_pred,
-            "y_proba":  y_proba,
+            "y_pred":      clf.predict(_X_test_s),
+            "y_proba":     y_proba,
         }
 
-    # Final model: Gradient Boosting.
-    # It is selected on evidence, not preference -- it wins on every metric measured
-    # above (ROC-AUC, Average Precision, Brier, cross-validated ROC-AUC). It is also
-    # already well calibrated out of the box (Brier 0.0067), so unlike the SVM it
-    # needs no post-hoc calibration wrapper. It is reused as-is from the comparison.
-    final_model = results["Gradient Boosting"]["model"]
+    # Selected on Average Precision — the metric that survives a 3.4% positive
+    # rate. Gradient Boosting wins it; picking by measurement rather than by name
+    # means a better model can replace it without editing this line.
+    best = max(results, key=lambda n: results[n]["avg_prec"])
+    final_model = models[best]
 
-    return results, final_model
-
-# ─────────────────────────────────────────────
-# 4. SHAP EXPLAINABILITY
-# ─────────────────────────────────────────────
-@st.cache_resource
-def compute_shap(_model, _X_train, _X_test, _features):
-    # SHAP runs on the *deployed* model, so the explanation describes the prediction
-    # the user is actually shown. Gradient Boosting is tree-based, so TreeSHAP applies
-    # exactly -- no sampling approximation.
-    explainer   = shap.TreeExplainer(_model)
-    shap_values = explainer.shap_values(_X_test)
-    # Handle both old SHAP (list of arrays) and new SHAP (3D array)
-    if isinstance(shap_values, list):
-        # Old SHAP: list of [class0_array, class1_array]
-        shap_vals = shap_values[1]
-    elif hasattr(shap_values, 'ndim') and shap_values.ndim == 3:
-        # New SHAP (>=0.41): shape (n_samples, n_features, n_classes)
-        shap_vals = shap_values[:, :, 1]
+    explainer = shap.TreeExplainer(final_model)
+    sv = explainer.shap_values(_X_test_s)
+    if isinstance(sv, list):
+        shap_vals = sv[1]
+    elif hasattr(sv, 'ndim') and sv.ndim == 3:
+        shap_vals = sv[:, :, 1]
     else:
-        shap_vals = shap_values
-    return explainer, shap_vals
+        shap_vals = sv
+
+    return results, final_model, shap_vals, best
+
 
 # ─────────────────────────────────────────────
 # LOAD EVERYTHING
 # ─────────────────────────────────────────────
-with st.spinner("Training and evaluating 4 models — this runs once and is cached..."):
-    (df, X, y, X_train, X_test, y_train, y_test,
-     X_train_s, X_test_s, scaler, features, failure_modes) = prepare_data()
+(df, X_train, X_test, X, y, y_train, y_test,
+ X_train_s, X_test_s, scaler) = get_data()
 
-    model_results, final_model = train_all_models(X_train_s, y_train, X_test_s, y_test)
+features = FEATURES
 
-    # SHAP explains the deployed model itself, not a stand-in
-    # Scaled inputs: the models are fitted on scaled data, so SHAP must be given the
-    # same representation. Feeding raw values to a model trained on standardised ones
-    # yields attributions for points far outside the training distribution.
-    shap_explainer, shap_vals = compute_shap(final_model, X_train_s, X_test_s, features)
+if ARTIFACT_PATH.exists():
+    model_results, final_model, shap_vals, best_name = load_or_train(
+        X_train_s, y_train, X_test_s, y_test)
+else:
+    with st.spinner("No precomputed artifact found — training four models "
+                    "(~40s, once). Run `python train.py` to skip this."):
+        model_results, final_model, shap_vals, best_name = load_or_train(
+            X_train_s, y_train, X_test_s, y_test)
+
+# TreeExplainer construction is cheap; only the shap_values pass over the test
+# set is expensive, and that is what the artifact stores.
+shap_explainer = shap.TreeExplainer(final_model)
 
 # ─────────────────────────────────────────────
 # UI LAYOUT
 # ─────────────────────────────────────────────
 st.title("⚙️ Industrial Predictive Maintenance — ML Deep Dive")
-st.caption("UCI AI4I 2020 Synthetic Dataset · 10,000 samples · 3.4% failure rate")
+st.caption(f"UCI AI4I 2020 Synthetic Dataset · 10,000 samples · 3.4% failure rate · "
+           f"deployed model: **{best_name}**, selected on Average Precision")
 
 tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🔍 Live Prediction",
@@ -212,23 +157,10 @@ with tab1:
         wear  = st.slider('Tool Wear [min]',          0,   250,     50)
         prod_type = st.selectbox('Product Type', ['L', 'M', 'H'])
 
-    # Build input with all engineered features
-    type_map = {'L': 0, 'M': 1, 'H': 2}
-    power_val = torq * (speed * 2 * np.pi / 60)
-    input_dict = {
-        'Air_Temp':          air,
-        'Process_Temp':      proc,
-        'Rot_Speed':         speed,
-        'Torque':            torq,
-        'Tool_Wear':         wear,
-        'Temp_Diff':         proc - air,
-        'Power':             power_val,
-        'Wear_Strain':       wear * torq,
-        'Speed_Torque_Ratio': speed / (torq + 1e-9),
-        'Thermal_Stress':    (proc - air) * power_val / 1e6,
-        'Type_Encoded':      type_map[prod_type],
-    }
-    input_df    = pd.DataFrame([input_dict])
+    # Route live input through the same engineer_features() path used in training,
+    # rather than restating the formulas here. Restating them is how a slider value
+    # and a training row silently stop meaning the same thing.
+    input_df     = build_input_row(air, proc, speed, torq, wear, prod_type)
     input_scaled = scaler.transform(input_df)
 
     # Deployed-model prediction

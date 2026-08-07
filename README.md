@@ -24,7 +24,7 @@ At the default 0.5 threshold, on a held-out stratified test set containing **68 
 | | Failures caught | Failures missed | False alarms |
 |---|---|---|---|
 | **Gradient Boosting** (deployed) | **55 / 68 — 80.9%** | **13** | **3** |
-| SVM + isotonic calibration | 29 / 68 — 42.6% | 39 | 10 |
+| SVM (RBF) — previously deployed | 26 / 68 — 38.2% | 42 | 7 |
 
 Catching 4 out of 5 failures while raising 3 false alarms across 2,000 machine cycles.
 
@@ -39,8 +39,16 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Opens at `http://localhost:8501`. The dataset downloads from UCI on first run and is cached;
-the four models train once (~40s on a laptop; measured 43s cold, including the download) and are cached after that. No API keys, no setup.
+Opens at `http://localhost:8501`, and starts in about a second. The dataset is committed and the
+trained models ship as a 0.1 MB artifact, so nothing is downloaded or fitted at startup.
+
+To retrain from scratch after changing the pipeline:
+
+```bash
+python train.py      # ~45s, rewrites artifacts.joblib
+```
+
+The app works without the artifact too — it falls back to training on startup. No API keys, no setup.
 
 ---
 
@@ -62,20 +70,25 @@ Four models, same stratified split, same scaler. The deployed model is whichever
 
 | Model | ROC-AUC | Avg Precision | Brier ↓ | CV ROC-AUC (5-fold) |
 |---|---|---|---|---|
-| Logistic Regression | 0.9404 | 0.4532 | 0.1036 | 0.9266 ± 0.0113 |
-| Random Forest | 0.9585 | 0.8496 | 0.0093 | 0.9733 ± 0.0113 |
-| **Gradient Boosting** | **0.9750** | **0.8966** | **0.0067** | **0.9802 ± 0.0145** |
+| Logistic Regression | 0.9403 | 0.4531 | 0.1036 | 0.9266 ± 0.0113 |
+| Random Forest | 0.9698 | 0.8432 | 0.0102 | 0.9786 ± 0.0111 |
+| **Gradient Boosting** | **0.9751** | **0.8980** | **0.0067** | **0.9819 ± 0.0124** |
 | SVM (RBF) | 0.9659 | 0.6268 | 0.0192 | 0.9477 ± 0.0134 |
+
+*Reproduced by `python train.py`; these are the exact values the app displays. Small drift
+between scikit-learn versions is normal — regenerate the artifact and this table moves together.*
 
 **Average Precision is the metric that decides this problem.** At a 3.39% failure rate, accuracy
 is meaningless — a model that predicts "nominal" forever scores 96.6%. ROC-AUC is also
 flattering here, because it is dominated by the vast nominal majority; every model above clears
 0.94 on it while differing enormously in practice. Average Precision only rewards performance on
-the rare positive class, and there the spread is real: **0.897 vs 0.627**.
+the rare positive class, and there the spread is real: **0.898 vs 0.627**.
 
 Gradient Boosting also needs no calibration wrapper. Its Brier score (0.0067) is already ~3×
-better than the SVM's (0.0192), and isotonic regression moved the SVM only from 0.0192 to
-0.0189 — so the wrapper was removed rather than kept for appearances.
+better than the SVM's (0.0192), and wrapping the SVM in isotonic regression moved it only to
+0.0189 — so the wrapper was removed rather than kept for appearances. (The previously deployed
+model was that calibrated SVM; it caught 29 of 68 failures, against the plain SVM's 26 and
+Gradient Boosting's 55.)
 
 > **This project used to deploy the SVM.** The comparison table above is why it no longer does.
 > The original version chose the SVM up front and then presented a comparison table that
@@ -96,8 +109,8 @@ far more than a false alarm (an unnecessary inspection). The deployed model's fu
 | 0.05 | 0.853 | 0.611 | 10 | 37 |
 
 Gradient Boosting is unusually stable here — dropping the threshold from 0.50 to 0.30 costs
-nothing and catches one more failure. The SVM was not: to reach comparable recall it needed a
-0.10 threshold and produced **93** false alarms against Gradient Boosting's 3.
+nothing and catches one more failure. The SVM was not: to reach comparable recall (0.824) it
+needed a 0.10 threshold, and produced **116** false alarms against Gradient Boosting's 3.
 
 ---
 
@@ -181,15 +194,35 @@ Worth stating plainly:
 
 ```
 predictive-maintenance-ml/
-├── app.py             # the entire application — data, features, models, SHAP, UI
+├── app.py             # Streamlit UI — the five tabs
+├── app_core.py        # data loading, feature engineering, the split
+├── train.py           # offline training → artifacts.joblib
+├── artifacts.joblib   # trained model + metrics + SHAP values (~0.1 MB)
+├── data/
+│   └── ai4i2020.csv   # committed so the live demo has no runtime dependency
 ├── requirements.txt
 ├── LICENSE
 └── README.md
 ```
 
-One file, deliberately. It is ~590 lines and reads top to bottom in pipeline order: load →
-engineer → train → explain → render. Splitting it across modules would add navigation cost
-without reducing complexity.
+**Why `app_core.py` exists.** Feature engineering is imported by both `app.py` and `train.py`
+rather than written twice. If the two had their own copies, one could be edited without the
+other and the app would score live input the model was never fitted on — train/serve skew, and
+a silent failure: no error, just quietly wrong predictions. For the same reason, the live
+sensor sliders in Tab 1 are routed through the same `engineer_features()` call the training
+rows went through, instead of restating the formulas in the UI.
+
+### Startup cost
+
+Measured, model-ready time excluding Python's library imports (~5s, paid once per process):
+
+| | |
+|---|---|
+| Training on launch | **~43s** — 5.7s download + 37s fitting and cross-validation |
+| Loading `artifacts.joblib` | **0.11s** — 0.09s CSV and features, 0.00s artifact, 0.02s TreeExplainer |
+
+Worth doing because Streamlit's free tier puts an app to sleep after inactivity — without the
+artifact, every visitor arriving after a quiet period would wait out a full retrain.
 
 ## License
 

@@ -4,7 +4,7 @@ __pycache__/
 venv/
 env/
 .streamlit/secrets.toml
-data/
+# data/ is committed on purpose: the deployed demo must not depend on UCI being up
 .DS_Store
 .vscode/
 .idea/
