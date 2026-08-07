@@ -165,7 +165,7 @@ milling-machine behaviour.
 
 - **339 failures (3.39%)** — realistic industrial class imbalance
 - **Five failure modes:** HDF (115), OSF (98), PWF (95), TWF (46), RNF (19)
-- Downloaded at runtime from the UCI ML Repository and cached by Streamlit
+- Loaded from the committed `data/ai4i2020.csv` file by default; the app falls back to the UCI ML Repository only if the local CSV is missing
 
 RNF is *random* failure — noise with no sensor signature by construction. It is included in the
 failure-mode analysis because pretending it is predictable would be dishonest about the ceiling

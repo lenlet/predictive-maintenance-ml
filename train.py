@@ -20,6 +20,7 @@ import joblib
 import numpy as np
 import shap
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (average_precision_score, brier_score_loss,
                              roc_auc_score)
@@ -40,8 +41,11 @@ def main():
         "Logistic Regression": LogisticRegression(class_weight="balanced", max_iter=1000, random_state=42),
         "Random Forest":       RandomForestClassifier(n_estimators=200, class_weight="balanced", random_state=42),
         "Gradient Boosting":   GradientBoostingClassifier(n_estimators=200, random_state=42),
-        "SVM (RBF)":           SVC(kernel="rbf", probability=True, class_weight="balanced",
-                                   C=10, gamma="scale", random_state=42),
+        "SVM (RBF)":           CalibratedClassifierCV(
+                                   estimator=SVC(kernel="rbf", class_weight="balanced",
+                                                 C=10, gamma="scale", random_state=42),
+                                   ensemble=False,
+                               ),
     }
 
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)

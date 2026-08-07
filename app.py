@@ -8,6 +8,7 @@ import seaborn as sns
 import shap
 import streamlit as st
 from sklearn.calibration import calibration_curve
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (average_precision_score, brier_score_loss,
@@ -64,7 +65,11 @@ def load_or_train(_X_train_s, _y_train, _X_test_s, _y_test):
         "Logistic Regression": LogisticRegression(class_weight='balanced', max_iter=1000, random_state=42),
         "Random Forest":       RandomForestClassifier(n_estimators=200, class_weight='balanced', random_state=42),
         "Gradient Boosting":   GradientBoostingClassifier(n_estimators=200, random_state=42),
-        "SVM (RBF)":           SVC(kernel='rbf', probability=True, class_weight='balanced', C=10, gamma='scale', random_state=42),
+        "SVM (RBF)":           CalibratedClassifierCV(
+                                    estimator=SVC(kernel='rbf', class_weight='balanced', C=10,
+                                                  gamma='scale', random_state=42),
+                                    ensemble=False,
+                                ),
     }
 
     results, models = {}, {}
@@ -423,14 +428,14 @@ with tab4:
         fig_sig, axes = plt.subplots(1, 3, figsize=(7, 2.8))
         for ax, feat in zip(axes, ['Tool_Wear', 'Torque', 'Temp_Diff']):
             failed  = df[df[selected_mode] == 1][feat]
-            nominal = df[df[selected_mode] == 0][feat].sample(500, random_state=42)
-            ax.hist(nominal, bins=30, alpha=0.6, label='Nominal', color='#3b82f6', density=True)
+            nominal = df[df['Machine_Failure'] == 0][feat].sample(500, random_state=42)
+            ax.hist(nominal, bins=30, alpha=0.6, label='Healthy', color='#3b82f6', density=True)
             ax.hist(failed,  bins=30, alpha=0.7, label='Failure', color='#ef4444', density=True)
             ax.set_xlabel(feat, fontsize=8)
             ax.set_ylabel('Density', fontsize=7)
             ax.legend(fontsize=7)
             ax.tick_params(labelsize=7)
-        fig_sig.suptitle(f'Sensor Distribution: {failure_labels[selected_mode]}', fontsize=9)
+        fig_sig.suptitle(f'Sensor Distribution: {failure_labels[selected_mode]} vs Healthy', fontsize=9)
         plt.tight_layout()
         st.pyplot(fig_sig, width='stretch')
 
