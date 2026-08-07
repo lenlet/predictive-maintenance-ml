@@ -3,7 +3,7 @@
 **Predict machine failure from live sensor readings — and show, per prediction, exactly which sensor drove the call.**
 
 [![Python](https://img.shields.io/badge/python-3.9%2B-blue.svg)](https://www.python.org/)
-[![Streamlit](https://img.shields.io/badge/streamlit-1.30%2B-FF4B4B.svg)](https://streamlit.io/)
+[![Streamlit](https://img.shields.io/badge/streamlit-1.50%2B-FF4B4B.svg)](https://streamlit.io/)
 [![scikit-learn](https://img.shields.io/badge/scikit--learn-1.3%2B-F7931E.svg)](https://scikit-learn.org/)
 [![SHAP](https://img.shields.io/badge/SHAP-explainable-8b5cf6.svg)](https://shap.readthedocs.io/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -40,7 +40,7 @@ streamlit run app.py
 ```
 
 Opens at `http://localhost:8501`. The dataset downloads from UCI on first run and is cached;
-the four models train once (~45s) and are cached after that. No API keys, no setup.
+the four models train once (~40s on a laptop; measured 43s cold, including the download) and are cached after that. No API keys, no setup.
 
 ---
 
@@ -187,7 +187,7 @@ predictive-maintenance-ml/
 └── README.md
 ```
 
-One file, deliberately. It is ~570 lines and reads top to bottom in pipeline order: load →
+One file, deliberately. It is ~590 lines and reads top to bottom in pipeline order: load →
 engineer → train → explain → render. Splitting it across modules would add navigation cost
 without reducing complexity.
 
